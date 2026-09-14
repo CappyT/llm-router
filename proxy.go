@@ -95,6 +95,9 @@ func (r *route) matches(model string) bool {
 // returned untouched when nothing changes.
 func (r *route) transformBody(body []byte, model string, countTokens bool) ([]byte, error) {
 	upstreamModel, rewrite := r.cfg.Rewrite[model]
+	if !rewrite && r.cfg.StripPrefix != "" {
+		upstreamModel, rewrite = strings.CutPrefix(model, r.cfg.StripPrefix)
+	}
 	if countTokens && r.cfg.CountTokensModel != "" {
 		upstreamModel, rewrite = r.cfg.CountTokensModel, true
 	}

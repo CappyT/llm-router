@@ -192,6 +192,35 @@ func TestRouting(t *testing.T) {
 	})
 }
 
+func TestStripPrefix(t *testing.T) {
+	got := make(chan captured, 1)
+	up := upstream(t, got, 200, `{}`)
+	t.Setenv("TEST_NANO_KEY", "nano-secret")
+	cfg := twoRouteConfig(t, up.URL, up.URL)
+	cfg.Routes = append([]RouteConfig{{
+		Name:        "nanogpt",
+		Upstream:    up.URL + "/api",
+		Models:      []string{"nano:*"},
+		Rewrite:     map[string]string{"nano:kimi": "moonshotai/kimi-k3"},
+		StripPrefix: "nano:",
+		Auth:        AuthConfig{Mode: authBearer, TokenEnv: "TEST_NANO_KEY"},
+	}}, cfg.Routes...)
+	srv := testRouter(t, cfg, "")
+
+	cases := []struct{ path, model, wantPath, wantModel string }{
+		{"/v1/messages", "nano:deepseek/deepseek-v4.1-flash:thinking", "/api/v1/messages", "deepseek/deepseek-v4.1-flash:thinking"},
+		{"/v1/messages/count_tokens", "nano:z-ai/glm-5.3", "/api/v1/messages/count_tokens", "z-ai/glm-5.3"},
+		{"/v1/messages", "nano:kimi", "/api/v1/messages", "moonshotai/kimi-k3"},
+		{"/v1/messages", "claude-opus-5", "/v1/messages", "claude-opus-5"},
+	}
+	for _, c := range cases {
+		post(t, srv.URL+c.path, `{"model":"`+c.model+`"}`, nil)
+		if g := <-got; g.path != c.wantPath || g.body["model"] != c.wantModel {
+			t.Errorf("%s %s: upstream path %q model %v", c.path, c.model, g.path, g.body["model"])
+		}
+	}
+}
+
 func TestUpstreamErrorPassthrough(t *testing.T) {
 	got := make(chan captured, 1)
 	errBody := `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`

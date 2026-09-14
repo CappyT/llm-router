@@ -29,7 +29,10 @@ type RouteConfig struct {
 	Models []string `json:"models"`
 	// Rewrite maps an incoming model ID to the ID sent upstream. Keys also match the route.
 	Rewrite map[string]string `json:"rewrite,omitempty"`
-	Auth    AuthConfig        `json:"auth"`
+	// StripPrefix is removed from the model ID sent upstream (e.g. "nano:"), for
+	// upstreams whose IDs have no distinctive prefix to route on. Rewrite wins.
+	StripPrefix string     `json:"strip_prefix,omitempty"`
+	Auth        AuthConfig `json:"auth"`
 	// DropHeaders are removed from requests sent upstream (e.g. anthropic-beta).
 	DropHeaders []string          `json:"drop_headers,omitempty"`
 	SetHeaders  map[string]string `json:"set_headers,omitempty"`
