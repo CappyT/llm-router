@@ -3,7 +3,7 @@
 A small reverse proxy that lets a single Claude Code session route requests to different
 Anthropic-compatible backends based on the `model` field. The typical use case: orchestrate with
 Opus on a Claude subscription and delegate subagent work to open models on
-[Synthetic](https://synthetic.new).
+[Synthetic](https://synthetic.new) or [NanoGPT](https://nano-gpt.com).
 
 Claude Code has one global `ANTHROPIC_BASE_URL` per process, so per-model backends need a proxy.
 Every backend here already speaks the Anthropic Messages API, so the router does **no format
@@ -16,14 +16,18 @@ claude (claude.ai login)
         │
     llm-router ──── model claude-*        → api.anthropic.com            (Authorization passed through)
                ├─── model hf:* / syn:*    → api.synthetic.new/anthropic  (Authorization replaced, anthropic-beta dropped)
+               ├─── model nano:*          → nano-gpt.com/api             (Authorization replaced, nano: prefix stripped)
                └─── anything else         → default_route
 ```
 
 ## Features
 
-- Routing by model glob (`hf:*`, `claude-*`), optional model ID rewrite (`"kimi": "hf:moonshotai/Kimi-K3"`).
+- Routing by model glob (`hf:*`, `claude-*`), optional model ID rewrite (`"kimi": "hf:moonshotai/Kimi-K3"`)
+  or routing-prefix stripping (`nano:z-ai/glm-5.3` → `z-ai/glm-5.3`).
 - Per-route auth: `passthrough`, `bearer`, `x-api-key`. The subscription OAuth token never reaches
   routes that replace auth.
+- Routes whose credential env is empty are disabled instead of blocking startup, so one config serves
+  any subset of providers.
 - Per-route header drop/set, top-level body field drop, per-tool field drop.
 - SSE streaming with immediate flush; upstream error bodies are passed through unchanged (Claude Code
   matches on error wording for retries).
@@ -45,11 +49,13 @@ curl -s localhost:8787/readyz
 Or build locally with Compose:
 
 ```bash
-export SYNTHETIC_API_KEY=...
+export SYNTHETIC_API_KEY=... NANOGPT_API_KEY=...   # either or both
 docker compose up -d --build
 ```
 
 The image ships `config.example.json` as `/etc/llm-router/config.json`; mount your own to override.
+Set the keys of the providers you use: routes whose key is empty are disabled, and the default
+`anthropic` route needs none.
 
 ## Claude Code setup
 
@@ -121,6 +127,43 @@ Tips specific to Synthetic's subscription limits:
   (`syn:large:text` → GLM-5.3-Flash, `syn:large:vision` → Kimi-K3; DeepSeek has no alias).
 - `count_tokens` and `/v2/quotas` calls do not count against limits.
 
+### Subagents on NanoGPT
+
+NanoGPT model IDs (`vendor/model`, plus a few bare names) have no prefix that sets them apart, so the
+example route claims a `nano:` prefix and strips it before forwarding:
+
+```json
+{
+  "name": "nanogpt",
+  "upstream": "https://nano-gpt.com/api",
+  "models": ["nano:*"],
+  "strip_prefix": "nano:",
+  "auth": { "mode": "bearer", "token_env": "NANOGPT_API_KEY" }
+}
+```
+
+In agent frontmatter use `model: nano:<NanoGPT ID>`, e.g. `nano:deepseek/deepseek-v4.1-flash`,
+`nano:z-ai/glm-5.3-flash` or `nano:moonshotai/kimi-k3`. Suffixes pass through unchanged
+(`nano:deepseek/deepseek-v4-pro:thinking`); IDs are case-sensitive.
+
+- The upstream is `https://nano-gpt.com/api` (Messages at `/api/v1/messages`). NanoGPT's own Claude
+  Code guide uses `…/api/v1` as base URL, which makes clients call `/api/v1/v1/messages` and follow a
+  307 redirect.
+- List models with context length, capabilities, pricing and subscription inclusion:
+  `curl -s 'https://nano-gpt.com/api/v1/models?detailed=true' | jq '.data[] | {id, context_length, pricing, subscription}'`.
+  `/api/subscription/v1/models` lists only the subscription models.
+- The subscription covers open models only (no `anthropic/*` model is included; some count input
+  tokens 2x). Per NanoGPT's docs billing is picked per request, and `"set_headers": {"X-Billing-Mode": "paygo"}`
+  forces pay-as-you-go. Subscribers can add `"quota": {"url": "https://nano-gpt.com/api/subscription/v1/usage"}`
+  to export `weeklyInputTokens.remaining`, `weeklyInputTokens.percentUsed`, `active`,
+  `routing.subscriptionQuotaAvailable` and related keys (`weeklyInputTokens.resetAt` is epoch
+  milliseconds).
+- NanoGPT's `count_tokens` is a generic estimate that ignores the model: for a small request with a
+  system prompt and one tool it returned 82 tokens where DeepSeek-V4.1-Flash billed 339, so `/context`
+  is approximate for `nano:` models.
+- Per NanoGPT's docs, non-Claude models are served by converting the request to OpenAI chat format
+  upstream; tool use and thinking fidelity depend on the model.
+
 ### What was verified
 
 Tested on 2026-09-14 with Claude Code 2.1.270 and a real Synthetic subscription: Opus on the claude.ai
@@ -139,6 +182,24 @@ login orchestrated `worker-small`, `worker` and `worker-big` in parallel through
   config sets `count_tokens_model` so counting goes through DeepSeek (different tokenizer, close enough
   for `/context`).
 
+NanoGPT was tested on 2026-09-14 with Claude Code 2.1.270 (headless, no user settings) and a
+pay-as-you-go key. The main loop ran on `nano:deepseek/deepseek-v4.1-flash`, a project subagent on
+`nano:z-ai/glm-5.3-flash`, and `ANTHROPIC_DEFAULT_HAIKU_MODEL` also pointed at GLM-5.3-Flash.
+
+- All 10 `/v1/messages` requests returned 200 through the router with Claude Code's own
+  `anthropic-beta`, `context_management`, `cache_control` and tool fields, so the route needs no
+  `drop_headers` or `drop_fields`.
+- The main loop spawned the subagent with the Agent tool. The subagent used Bash, Write and Read, its
+  requests carried `x-claude-code-agent-id`, and the main loop read back the file it wrote.
+- Streamed tool calls arrive as `tool_use` / `input_json_delta` events. `message_start` reports zero
+  usage and `message_delta` the final counts, which the usage metrics pick up.
+- NanoGPT's prefix cache hits on follow-up turns (`cache_read_input_tokens` ≈ 19k on DeepSeek, 2–3k
+  on GLM); `cache_creation_input_tokens` stayed 0.
+- Time to first byte was 4–13 s per request, around 8 s on GLM-5.3-Flash.
+- `count_tokens` through the router (`nano:` stripped) returned 200.
+- With `NANOGPT_API_KEY` unset the route is disabled: Claude Code received the 503 once and exited
+  after 2 s without retrying.
+
 ## Configuration
 
 Config file path: `-config` flag, `LLM_ROUTER_CONFIG`, default `/etc/llm-router/config.json`.
@@ -154,8 +215,9 @@ non-`/v1/messages*` paths go to `default_route`.
 | `routes[].upstream` | Base URL; the request path is appended (`…/anthropic` + `/v1/messages`). |
 | `routes[].models` | Glob patterns; `*` matches any sequence including `/`. |
 | `routes[].rewrite` | Map incoming model ID → upstream model ID. Keys also match the route. |
+| `routes[].strip_prefix` | Prefix removed from the model ID sent upstream when present (e.g. `nano:`). `rewrite` wins; the route still needs a matching `models` glob. |
 | `routes[].auth.mode` | `passthrough`, `bearer` or `x-api-key`. |
-| `routes[].auth.token_env` | Env var holding the credential (required unless passthrough; checked at startup). |
+| `routes[].auth.token_env` | Env var holding the credential (required unless passthrough). If it is empty at startup the route is disabled: a warning is logged, quota polling is skipped and matching requests get 503 with `x-should-retry: false`. The default route must have it. |
 | `routes[].drop_headers` | Request headers removed before forwarding. |
 | `routes[].set_headers` | Request headers set before forwarding. |
 | `routes[].drop_fields` | Top-level body fields removed on `/v1/messages*` (e.g. `context_management`). |
@@ -193,7 +255,7 @@ the original bytes.
 | `llm_router_request_duration_seconds` | `route`, `model` | Includes the full streamed body. |
 | `llm_router_time_to_first_byte_seconds` | `route`, `model` | Time to response headers; includes upstream queueing. |
 | `llm_router_inflight_requests` | `route`, `model` | |
-| `llm_router_tokens_total` | `route`, `model`, `type` | `input`, `output`, `cache_read`, `cache_creation`, from `usage` blocks of `/v1/messages` 2xx responses (SSE and JSON). For SSE the latest event carrying a field wins. Values are reported as the upstream sends them: Synthetic reports `input_tokens` equal to `cache_creation_input_tokens` (the uncached part counted in both), so don't add the two for Synthetic. |
+| `llm_router_tokens_total` | `route`, `model`, `type` | `input`, `output`, `cache_read`, `cache_creation`, from `usage` blocks of `/v1/messages` 2xx responses (SSE and JSON). For SSE the latest event carrying a field wins. Values are reported as the upstream sends them: Synthetic reports `input_tokens` equal to `cache_creation_input_tokens` (the uncached part counted in both), so don't add the two for Synthetic. NanoGPT's `input_tokens` excludes `cache_read_input_tokens`. |
 | `llm_router_upstream_errors_total` | `route` | Transport-level failures. |
 | `llm_router_upstream_quota` | `route`, `key` | Numeric leaves of the quota response, flattened with dots (`subscription.requests`); RFC 3339 strings become unix seconds, booleans 0/1. |
 | `llm_router_quota_scrapes_total` | `route`, `result` | |
@@ -235,7 +297,9 @@ containers:
     ports: [{ name: http, containerPort: 8787 }]
     env:
       - name: SYNTHETIC_API_KEY
-        valueFrom: { secretKeyRef: { name: llm-router, key: synthetic-api-key } }
+        valueFrom: { secretKeyRef: { name: llm-router, key: synthetic-api-key, optional: true } }
+      - name: NANOGPT_API_KEY
+        valueFrom: { secretKeyRef: { name: llm-router, key: nanogpt-api-key, optional: true } }
       - name: LLM_ROUTER_CLIENT_TOKEN
         valueFrom: { secretKeyRef: { name: llm-router, key: client-token } }
     volumeMounts:
@@ -252,7 +316,7 @@ terminationGracePeriodSeconds: 90
 
 Scrape `/metrics` on the `http` port with a ServiceMonitor/PodMonitor. When the router is reachable
 beyond localhost, always set `LLM_ROUTER_CLIENT_TOKEN`: otherwise anyone who can reach it spends your
-Synthetic key.
+provider keys.
 
 ## Caveats
 
@@ -260,7 +324,7 @@ Synthetic key.
   the model.
 - Because `ANTHROPIC_BASE_URL` points to a non-Anthropic host, Claude Code runs in gateway mode for the
   whole session (e.g. some first-party-only features may be disabled for the Opus loop too).
-- Claude Code does not know the context window of `hf:`/`syn:` IDs. Check with `/context` inside a
+- Claude Code does not know the context window of `hf:`/`syn:`/`nano:` IDs. Check with `/context` inside a
   subagent-heavy session; `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is global and would also affect Opus.
 - Synthetic's documented Messages schema does not list `thinking`, `metadata`, `cache_control` or
   beta fields. Claude Code works against it directly per Synthetic's own guide; if a specific field
@@ -272,7 +336,7 @@ Requires Go 1.27.
 
 ```bash
 go test -race ./...
-SYNTHETIC_API_KEY=... go run . -config config.example.json
+SYNTHETIC_API_KEY=... NANOGPT_API_KEY=... go run . -config config.example.json
 ```
 
 ## Releases
