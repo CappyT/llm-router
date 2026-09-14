@@ -237,16 +237,17 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	inflight.Dec()
 
 	elapsed := time.Since(start)
-	rt.metrics.requests.WithLabelValues(r.cfg.Name, modelLabel, strconv.Itoa(rec.status)).Inc()
-	rt.metrics.duration.WithLabelValues(r.cfg.Name, modelLabel).Observe(elapsed.Seconds())
-	if rec.wroteHeader {
-		rt.metrics.ttfb.WithLabelValues(r.cfg.Name, modelLabel).Observe(rec.ttfb.Seconds())
-	}
 	var usage apiUsage
 	if rec.usage != nil {
 		usage = rec.usage.finish()
 		rt.metrics.observeUsage(r.cfg.Name, modelLabel, usage)
 	}
+	rt.metrics.duration.WithLabelValues(r.cfg.Name, modelLabel).Observe(elapsed.Seconds())
+	if rec.wroteHeader {
+		rt.metrics.ttfb.WithLabelValues(r.cfg.Name, modelLabel).Observe(rec.ttfb.Seconds())
+	}
+	// Counted last, so a request visible in requests_total has its other series recorded.
+	rt.metrics.requests.WithLabelValues(r.cfg.Name, modelLabel, strconv.Itoa(rec.status)).Inc()
 
 	rt.log.Info("request",
 		"method", req.Method,

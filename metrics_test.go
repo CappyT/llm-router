@@ -79,7 +79,8 @@ func TestMetricsEndToEnd(t *testing.T) {
 	io.ReadAll(resp.Body)
 
 	// The handler records metrics after the response body is flushed, so the
-	// client can see EOF slightly before the counters move.
+	// client can see EOF slightly before the counters move. requests_total is
+	// updated last, so waiting on it also covers the token counters.
 	requests := m.requests.WithLabelValues("synthetic", "hf:moonshotai/Kimi-K3", "200")
 	deadline := time.Now().Add(2 * time.Second)
 	for testutil.ToFloat64(requests) != 1 && time.Now().Before(deadline) {
