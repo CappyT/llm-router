@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"cmp"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -22,12 +23,13 @@ import (
 const clientTokenHeader = "X-Llm-Router-Token"
 
 type router struct {
-	routes      []*route
-	fallback    *route
-	clientToken string
-	maxBody     int64
-	log         *slog.Logger
-	metrics     *metrics
+	routes   []*route
+	fallback *route
+	// tokenSum is the SHA-256 of the client token, nil when no token is required.
+	tokenSum *[sha256.Size]byte
+	maxBody  int64
+	log      *slog.Logger
+	metrics  *metrics
 }
 
 type route struct {
@@ -39,7 +41,10 @@ type route struct {
 }
 
 func newRouter(cfg *Config, clientToken string, transport http.RoundTripper, log *slog.Logger, m *metrics) (*router, error) {
-	rt := &router{clientToken: clientToken, maxBody: cfg.MaxBodyBytes, log: log, metrics: m}
+	rt := &router{maxBody: cfg.MaxBodyBytes, log: log, metrics: m}
+	if clientToken != "" {
+		rt.tokenSum = new(sha256.Sum256([]byte(clientToken)))
+	}
 	for _, rc := range cfg.Routes {
 		target, err := url.Parse(rc.Upstream)
 		if err != nil {
@@ -177,11 +182,18 @@ func (rt *router) match(model string) *route {
 	return rt.fallback
 }
 
+// authorized compares SHA-256 digests in constant time, so neither timing nor the token length leaks.
+func (rt *router) authorized(req *http.Request) bool {
+	sum := sha256.Sum256([]byte(req.Header.Get(clientTokenHeader)))
+	return subtle.ConstantTimeCompare(sum[:], rt.tokenSum[:]) == 1
+}
+
 func (rt *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if rt.clientToken != "" &&
-		subtle.ConstantTimeCompare([]byte(req.Header.Get(clientTokenHeader)), []byte(rt.clientToken)) != 1 {
-		writeError(w, http.StatusUnauthorized, "authentication_error", "llm-router: invalid or missing "+clientTokenHeader)
-		return
+	if rt.tokenSum != nil && !rt.authorized(req) {
+		// No response at all, not even a 401: the connection is closed (HTTP/2: the stream is
+		// reset), leaving scanners and brute-forcers nothing to fingerprint.
+		rt.metrics.rejected.Inc()
+		panic(http.ErrAbortHandler)
 	}
 	req.Header.Del(clientTokenHeader)
 

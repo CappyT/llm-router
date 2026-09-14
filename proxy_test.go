@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 type captured struct {
@@ -236,11 +238,38 @@ func TestUpstreamErrorPassthrough(t *testing.T) {
 func TestClientToken(t *testing.T) {
 	got := make(chan captured, 1)
 	ant := upstream(t, got, 200, `{}`)
-	srv := testRouter(t, twoRouteConfig(t, ant.URL, ant.URL), "s3cret")
-
-	if resp := post(t, srv.URL+"/v1/messages", `{"model":"claude-opus-5"}`, nil); resp.StatusCode != 401 {
-		t.Errorf("missing token: status %d", resp.StatusCode)
+	cfg := twoRouteConfig(t, ant.URL, ant.URL)
+	if err := cfg.validate(); err != nil {
+		t.Fatal(err)
 	}
+	m := newMetrics()
+	rt, err := newRouter(cfg, "s3cret", http.DefaultTransport, slog.New(slog.DiscardHandler), m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(rt)
+	t.Cleanup(srv.Close)
+
+	for name, token := range map[string]string{"missing": "", "wrong": "s3cret-not", "prefix": "s3cre"} {
+		req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/v1/messages", strings.NewReader(`{"model":"claude-opus-5"}`))
+		if token != "" {
+			req.Header.Set(clientTokenHeader, token)
+		}
+		// No response is written, so the client only sees the connection close.
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			resp.Body.Close()
+			t.Errorf("%s token: status %d, want a dropped connection", name, resp.StatusCode)
+		}
+	}
+	if v := testutil.ToFloat64(m.rejected); v != 3 {
+		t.Errorf("rejected %v, want 3", v)
+	}
+	select {
+	case <-got:
+		t.Error("unauthenticated request reached the upstream")
+	default:
+	}
+
 	resp := post(t, srv.URL+"/v1/messages", `{"model":"claude-opus-5"}`, map[string]string{clientTokenHeader: "s3cret"})
 	if resp.StatusCode != 200 {
 		t.Fatalf("valid token: status %d", resp.StatusCode)

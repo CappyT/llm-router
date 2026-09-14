@@ -27,6 +27,7 @@ type metrics struct {
 	upstreamErrors *prometheus.CounterVec
 	quota          *prometheus.GaugeVec
 	quotaScrapes   *prometheus.CounterVec
+	rejected       prometheus.Counter
 }
 
 func newMetrics() *metrics {
@@ -67,11 +68,15 @@ func newMetrics() *metrics {
 			Name: "llm_router_quota_scrapes_total",
 			Help: "Quota endpoint polls by result.",
 		}, []string{"route", "result"}),
+		rejected: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "llm_router_rejected_requests_total",
+			Help: "Requests dropped without a response for a missing or wrong client token.",
+		}),
 	}
 	reg.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
-		m.requests, m.duration, m.ttfb, m.inflight, m.tokens, m.upstreamErrors, m.quota, m.quotaScrapes,
+		m.requests, m.duration, m.ttfb, m.inflight, m.tokens, m.upstreamErrors, m.quota, m.quotaScrapes, m.rejected,
 	)
 	return m
 }
