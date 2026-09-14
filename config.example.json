@@ -12,6 +12,13 @@
       "quota": { "url": "https://api.synthetic.new/v2/quotas", "interval": "60s" }
     },
     {
+      "name": "nanogpt",
+      "upstream": "https://nano-gpt.com/api",
+      "models": ["nano:*"],
+      "strip_prefix": "nano:",
+      "auth": { "mode": "bearer", "token_env": "NANOGPT_API_KEY" }
+    },
+    {
       "name": "anthropic",
       "upstream": "https://api.anthropic.com",
       "models": ["claude-*"],
