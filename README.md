@@ -44,7 +44,7 @@ claude (claude.ai login)
 Published images: `ghcr.io/cappyt/llm-router:<version>` (`linux/amd64`, `linux/arm64`).
 
 ```bash
-docker run -d --name llm-router -p 127.0.0.1:8787:8787 -e SYNTHETIC_API_KEY ghcr.io/cappyt/llm-router:0.1.1
+docker run -d --name llm-router -p 127.0.0.1:8787:8787 -e SYNTHETIC_API_KEY ghcr.io/cappyt/llm-router:0.2.0
 curl -s localhost:8787/readyz
 ```
 
@@ -307,7 +307,7 @@ Run it as a Deployment with the config in a ConfigMap and the key in a Secret:
 ```yaml
 containers:
   - name: llm-router
-    image: ghcr.io/cappyt/llm-router:0.1.1
+    image: ghcr.io/cappyt/llm-router:0.2.0
     ports: [{ name: http, containerPort: 8787 }]
     env:
       - name: SYNTHETIC_API_KEY
