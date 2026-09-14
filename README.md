@@ -34,7 +34,9 @@ claude (claude.ai login)
 - Prometheus `/metrics`: requests, duration, time-to-first-byte, in-flight, token usage (including
   cache read/creation) parsed from response `usage` blocks, and upstream quota polling.
 - `/livez`, `/readyz` with graceful drain on SIGTERM.
-- Optional shared client token (`X-Llm-Router-Token`) when the router is not bound to localhost.
+- Optional shared client token (`X-Llm-Router-Token`): requests without it get no response at all. With
+  `LLM_ROUTER_ADMIN_LISTEN`, probes and metrics move to their own port, so the API port can face the
+  internet.
 - Stdlib + `prometheus/client_golang` only, distroless static image.
 
 ## Quick start
@@ -86,7 +88,8 @@ Or persist it in `~/.claude/settings.json`:
 recommends to avoid cache busting.
 
 If you set `LLM_ROUTER_CLIENT_TOKEN`, add
-`ANTHROPIC_CUSTOM_HEADERS="X-Llm-Router-Token: <token>"`.
+`ANTHROPIC_CUSTOM_HEADERS="X-Llm-Router-Token: <token>"`. With a missing or wrong token the router
+drops the connection, so Claude Code reports a connection error rather than a 401.
 
 ### Subagents on Synthetic
 
@@ -232,7 +235,8 @@ Environment:
 |---|---|
 | `LLM_ROUTER_CONFIG` | Config file path. |
 | `LLM_ROUTER_LISTEN` | Overrides `listen`. |
-| `LLM_ROUTER_CLIENT_TOKEN` | If set, API requests must carry `X-Llm-Router-Token`. Probes and metrics are exempt. The header is stripped before forwarding. |
+| `LLM_ROUTER_CLIENT_TOKEN` | If set, API requests must carry `X-Llm-Router-Token`. Requests without it, or with a wrong value, get no response at all: the connection is closed (HTTP/2: the stream is reset) and `llm_router_rejected_requests_total` is incremented. The token is compared as SHA-256 digests in constant time and stripped before forwarding. Probes and metrics stay exempt unless `LLM_ROUTER_ADMIN_LISTEN` is set. |
+| `LLM_ROUTER_ADMIN_LISTEN` | Serves `/livez`, `/readyz` and `/metrics` on this address (e.g. `:9090`) instead of the API listener, which then answers nothing without the client token. `-healthcheck` probes this address. |
 | `LLM_ROUTER_DRAIN_DELAY` | Time between failing `/readyz` and closing listeners on SIGTERM, default `5s`. |
 
 The body is only re-encoded when a rewrite or field drop actually applies; otherwise upstream receives
@@ -247,6 +251,15 @@ the original bytes.
 | `GET /metrics` | Prometheus exposition. |
 | everything else | Proxied. |
 
+All three are served on `LLM_ROUTER_ADMIN_LISTEN` instead when it is set.
+
+### Exposing the router publicly
+
+Set a long random `LLM_ROUTER_CLIENT_TOKEN` (e.g. `openssl rand -hex 32`) and
+`LLM_ROUTER_ADMIN_LISTEN`, point probes and scraping at the admin port, and route only the API port
+through the gateway. A reverse proxy in front still answers on its own when the router drops a
+connection (typically with a 502/503), so rate-limit unauthenticated traffic there as well.
+
 ## Metrics
 
 | Metric | Labels | Notes |
@@ -259,6 +272,7 @@ the original bytes.
 | `llm_router_upstream_errors_total` | `route` | Transport-level failures. |
 | `llm_router_upstream_quota` | `route`, `key` | Numeric leaves of the quota response, flattened with dots (`subscription.requests`); RFC 3339 strings become unix seconds, booleans 0/1. |
 | `llm_router_quota_scrapes_total` | `route`, `result` | |
+| `llm_router_rejected_requests_total` | | Requests dropped for a missing or wrong client token. |
 
 Synthetic's `/v2/quotas` currently exposes (among others) `subscription.limit`,
 `subscription.requests`, `rollingFiveHourLimit.remaining`, `rollingFiveHourLimit.max`,
