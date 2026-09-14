@@ -1,0 +1,21 @@
+{
+  "listen": ":8787",
+  "default_route": "anthropic",
+  "routes": [
+    {
+      "name": "synthetic",
+      "upstream": "https://api.synthetic.new/anthropic",
+      "models": ["hf:*", "syn:*"],
+      "auth": { "mode": "bearer", "token_env": "SYNTHETIC_API_KEY" },
+      "drop_headers": ["anthropic-beta"],
+      "count_tokens_model": "hf:deepseek-ai/DeepSeek-V4.1-Flash",
+      "quota": { "url": "https://api.synthetic.new/v2/quotas", "interval": "60s" }
+    },
+    {
+      "name": "anthropic",
+      "upstream": "https://api.anthropic.com",
+      "models": ["claude-*"],
+      "auth": { "mode": "passthrough" }
+    }
+  ]
+}

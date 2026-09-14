@@ -1,0 +1,12 @@
+services:
+  llm-router:
+    build: .
+    image: llm-router:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      SYNTHETIC_API_KEY: ${SYNTHETIC_API_KEY}
+      LLM_ROUTER_CLIENT_TOKEN: ${LLM_ROUTER_CLIENT_TOKEN:-}
+    volumes:
+      - ./config.example.json:/etc/llm-router/config.json:ro
