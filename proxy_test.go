@@ -295,10 +295,56 @@ func TestValidate(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	for _, want := range []string{"duplicate name", "absolute http(s)", "EMPTY_KEY is empty", "unknown auth.mode", "default_route"} {
+	for _, want := range []string{"duplicate name", "absolute http(s)", "unknown auth.mode", "default_route"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q missing %q", err, want)
 		}
+	}
+
+	cfg = &Config{
+		DefaultRoute: "a",
+		Routes: []RouteConfig{
+			{Name: "a", Upstream: "https://x", Auth: AuthConfig{Mode: authBearer, TokenEnv: "EMPTY_KEY"}},
+			{Name: "b", Upstream: "https://x", Auth: AuthConfig{Mode: authXAPIKey, TokenEnv: "EMPTY_KEY"}},
+		},
+	}
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), `default route "a": env EMPTY_KEY is empty`) {
+		t.Errorf("empty default route credential: %v", err)
+	}
+	cfg.Routes[0].Auth = AuthConfig{Mode: authPassthrough}
+	if err := cfg.validate(); err != nil {
+		t.Errorf("empty credential on a non-default route must not fail validation: %v", err)
+	}
+}
+
+func TestDisabledRoute(t *testing.T) {
+	got := make(chan captured, 1)
+	up := upstream(t, got, 200, `{}`)
+	t.Setenv("TEST_NANO_KEY", "")
+	cfg := twoRouteConfig(t, up.URL, up.URL)
+	cfg.Routes = append([]RouteConfig{{
+		Name:     "nanogpt",
+		Upstream: up.URL,
+		Models:   []string{"nano:*"},
+		Auth:     AuthConfig{Mode: authBearer, TokenEnv: "TEST_NANO_KEY"},
+	}}, cfg.Routes...)
+	srv := testRouter(t, cfg, "")
+
+	resp := post(t, srv.URL+"/v1/messages", `{"model":"nano:z-ai/glm-5.3-flash"}`, nil)
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusServiceUnavailable || resp.Header.Get("X-Should-Retry") != "false" ||
+		!strings.Contains(string(raw), `route \"nanogpt\" is disabled: env TEST_NANO_KEY is empty`) {
+		t.Errorf("status %d x-should-retry %q body %s", resp.StatusCode, resp.Header.Get("X-Should-Retry"), raw)
+	}
+	select {
+	case c := <-got:
+		t.Errorf("disabled route reached upstream: %s", c.path)
+	default:
+	}
+
+	post(t, srv.URL+"/v1/messages", `{"model":"claude-opus-5"}`, nil)
+	if c := <-got; c.body["model"] != "claude-opus-5" {
+		t.Errorf("enabled route: model %v", c.body["model"])
 	}
 }
 

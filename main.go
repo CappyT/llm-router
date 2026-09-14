@@ -71,7 +71,7 @@ func run(configPath string, healthcheck bool, log *slog.Logger) error {
 
 	quotaClient := &http.Client{Transport: transport}
 	for _, r := range rt.routes {
-		if r.cfg.Quota != nil {
+		if r.cfg.Quota != nil && !r.disabled {
 			go m.pollQuota(ctx, r, quotaClient, log)
 		}
 	}

@@ -33,7 +33,9 @@ type router struct {
 type route struct {
 	cfg   RouteConfig
 	token string
-	proxy *httputil.ReverseProxy
+	// disabled routes have an empty credential env; matching requests are rejected.
+	disabled bool
+	proxy    *httputil.ReverseProxy
 }
 
 func newRouter(cfg *Config, clientToken string, transport http.RoundTripper, log *slog.Logger, m *metrics) (*router, error) {
@@ -46,6 +48,10 @@ func newRouter(cfg *Config, clientToken string, transport http.RoundTripper, log
 		r := &route{cfg: rc}
 		if rc.Auth.TokenEnv != "" {
 			r.token = os.Getenv(rc.Auth.TokenEnv)
+		}
+		if rc.Auth.Mode != authPassthrough && r.token == "" {
+			r.disabled = true
+			log.Warn("route disabled: credential env is empty", "route", rc.Name, "env", rc.Auth.TokenEnv)
 		}
 		r.proxy = &httputil.ReverseProxy{
 			Rewrite:       func(pr *httputil.ProxyRequest) { r.rewrite(pr, target) },
@@ -202,6 +208,13 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		model = probe.Model
 		r = rt.match(model)
+		if r.disabled {
+			rt.log.Warn("request rejected: route disabled", "route", r.cfg.Name, "model", model, "env", r.cfg.Auth.TokenEnv)
+			w.Header().Set("X-Should-Retry", "false")
+			writeError(w, http.StatusServiceUnavailable, "api_error",
+				fmt.Sprintf("llm-router: route %q is disabled: env %s is empty", r.cfg.Name, r.cfg.Auth.TokenEnv))
+			return
+		}
 		if body, err = r.transformBody(body, model, req.URL.Path == "/v1/messages/count_tokens"); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_request_error", "llm-router: transform body: "+err.Error())
 			return

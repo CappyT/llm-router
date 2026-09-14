@@ -124,8 +124,9 @@ func (c *Config) validate() error {
 		case authBearer, authXAPIKey:
 			if r.Auth.TokenEnv == "" {
 				errs = append(errs, fmt.Errorf("route %q: auth.token_env is required for mode %q", r.Name, r.Auth.Mode))
-			} else if os.Getenv(r.Auth.TokenEnv) == "" {
-				errs = append(errs, fmt.Errorf("route %q: env %s is empty", r.Name, r.Auth.TokenEnv))
+			} else if os.Getenv(r.Auth.TokenEnv) == "" && r.Name == c.DefaultRoute {
+				// Other routes without a credential are disabled by newRouter instead.
+				errs = append(errs, fmt.Errorf("default route %q: env %s is empty", r.Name, r.Auth.TokenEnv))
 			}
 		default:
 			errs = append(errs, fmt.Errorf("route %q: unknown auth.mode %q", r.Name, r.Auth.Mode))
