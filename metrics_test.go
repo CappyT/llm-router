@@ -72,7 +72,8 @@ func TestMetricsEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	var ready atomic.Bool
-	srv := httptest.NewServer(newHandler(rt, m, &ready))
+	handler, _ := newHandlers(rt, m, &ready, false)
+	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
 	resp := post(t, srv.URL+"/v1/messages", `{"model":"hf:moonshotai/Kimi-K3","stream":true}`, nil)

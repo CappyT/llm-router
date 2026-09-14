@@ -21,7 +21,7 @@ import (
 
 func main() {
 	configPath := flag.String("config", cmp.Or(os.Getenv("LLM_ROUTER_CONFIG"), "/etc/llm-router/config.json"), "path to config file")
-	healthcheck := flag.Bool("healthcheck", false, "probe /livez on the configured listen address and exit")
+	healthcheck := flag.Bool("healthcheck", false, "probe /livez on the admin (or listen) address and exit")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -37,9 +37,11 @@ func run(configPath string, healthcheck bool, log *slog.Logger) error {
 		return err
 	}
 	listen := cmp.Or(os.Getenv("LLM_ROUTER_LISTEN"), cfg.Listen, ":8787")
+	// With a separate admin listener the API listener answers nothing without the client token.
+	adminListen := os.Getenv("LLM_ROUTER_ADMIN_LISTEN")
 
 	if healthcheck {
-		return probe(listen)
+		return probe(cmp.Or(adminListen, listen))
 	}
 
 	drainDelay := 5 * time.Second
@@ -53,17 +55,26 @@ func run(configPath string, healthcheck bool, log *slog.Logger) error {
 	transport.MaxIdleConnsPerHost = 32
 
 	m := newMetrics()
-	rt, err := newRouter(cfg, os.Getenv("LLM_ROUTER_CLIENT_TOKEN"), transport, log, m)
+	clientToken := os.Getenv("LLM_ROUTER_CLIENT_TOKEN")
+	rt, err := newRouter(cfg, clientToken, transport, log, m)
 	if err != nil {
 		return err
 	}
 
 	var ready atomic.Bool
-	srv := &http.Server{
+	apiHandler, adminHandler := newHandlers(rt, m, &ready, adminListen != "")
+	servers := []*http.Server{{
 		Addr:              listen,
-		Handler:           newHandler(rt, m, &ready),
+		Handler:           apiHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
+	}}
+	if adminHandler != nil {
+		servers = append(servers, &http.Server{
+			Addr:              adminListen,
+			Handler:           adminHandler,
+			ReadHeaderTimeout: 10 * time.Second,
+		})
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -76,20 +87,28 @@ func run(configPath string, healthcheck bool, log *slog.Logger) error {
 		}
 	}
 
-	ln, err := net.Listen("tcp", listen)
-	if err != nil {
-		return err
+	errc := make(chan error, len(servers))
+	addrs := make([]string, 0, len(servers))
+	for _, srv := range servers {
+		ln, err := net.Listen("tcp", srv.Addr)
+		if err != nil {
+			return err
+		}
+		addrs = append(addrs, ln.Addr().String())
+		go func() { errc <- srv.Serve(ln) }()
 	}
-	errc := make(chan error, 1)
-	go func() { errc <- srv.Serve(ln) }()
 	ready.Store(true)
 
 	routes := make([]string, 0, len(cfg.Routes))
 	for _, r := range cfg.Routes {
 		routes = append(routes, r.Name+"="+r.Upstream)
 	}
-	log.Info("listening", "addr", ln.Addr().String(), "default_route", cfg.DefaultRoute, "routes", routes,
-		"client_token", os.Getenv("LLM_ROUTER_CLIENT_TOKEN") != "")
+	adminAddr := ""
+	if len(addrs) > 1 {
+		adminAddr = addrs[1]
+	}
+	log.Info("listening", "addr", addrs[0], "admin_addr", adminAddr,
+		"default_route", cfg.DefaultRoute, "routes", routes, "client_token", clientToken != "")
 
 	select {
 	case err := <-errc:
@@ -104,14 +123,20 @@ func run(configPath string, healthcheck bool, log *slog.Logger) error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		return err
+	// The API listener goes first; the admin listener keeps answering probes until the end.
+	for _, srv := range servers {
+		if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 	}
 	log.Info("stopped")
 	return nil
 }
 
-func newHandler(rt http.Handler, m *metrics, ready *atomic.Bool) http.Handler {
+// newHandlers returns the API handler and, when separateAdmin is set, a handler for /livez,
+// /readyz and /metrics to serve on its own listener. Otherwise the API handler serves those
+// endpoints too, exempt from the client token, and admin is nil.
+func newHandlers(rt http.Handler, m *metrics, ready *atomic.Bool, separateAdmin bool) (api, admin http.Handler) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) {
 		io.WriteString(w, "ok\n")
@@ -124,8 +149,11 @@ func newHandler(rt http.Handler, m *metrics, ready *atomic.Bool) http.Handler {
 		io.WriteString(w, "ok\n")
 	})
 	mux.Handle("GET /metrics", promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{}))
+	if separateAdmin {
+		return rt, mux
+	}
 	mux.Handle("/", rt)
-	return mux
+	return mux, nil
 }
 
 func probe(listen string) error {
